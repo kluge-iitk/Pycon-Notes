@@ -3,6 +3,14 @@
 
 Note: These notes use Python 3, the talks were in Python 2.
 
+The Mission Statement
+=======
+
+- Practical uses of generators
+- Focus on **systems programming**
+- Which loosely includes files, file systems, parsing, networking, threads etc.
+- To provide some more compelling examples of using generators
+
 PART 1: Introduction to Iterators and Generators
 =====================
 
@@ -335,3 +343,195 @@ that match a given filename pattern
 
 PART 4 - Parsing and Processing Data
 ====
+
+Programming Problem
+----
+
+> **Web server logs consist of different columns of data. Parse each line into a useful data structure that allows us to easily inspect the different fields**
+
+    81.107.39.38 - - [24/Feb/2008:00:08:59 -0600] "GET ..." 200 7587
+    # format: host referrer user [datetime] "request" status bytes
+
+#### Parsing with Regex
+
+- Let's route the lines through a regex parser
+
+        logpats = r'(\S+) (\S+) (\S+) \[(.*?)\] '\
+                  r'"(\S+) (\S+) (\S+)" (\S+) (\S+)'
+        logpat = re.compile(logpats)
+        groups = (logpat.match(line) for line in loglines)
+        tuples = (g.groups() for g in groups if g)
+
+- This generates a sequence of tuples
+
+        ('71.201.176.194', '-', '-', '26/Feb/2008:10:30:08 -0600',
+        'GET', '/ply/ply.html', 'HTTP/1.1', '200', '97238')
+
+#### Tuples to Dictionaries
+
+- David doesn't like data processing on tuples:
+
+  * They are immutable so you can't Modify
+  * To extract specific fields, you have to remember the column number - which is annoying if there are a lot of columns
+  * Existing code breaks if you change the number of fields
+
+
+- Turn tuples to dictionaries
+
+        colnames = ('host', 'referrer', 'user', 'datetime',
+                    'method', 'request', 'proto', 'status', 'bytes')
+        log = (dict(zip(colnames, t)) for t in tuples)
+
+- which generates a sequence of named fields
+
+        {'status': '200',
+        'proto': 'HTTP/1.1',
+        'referrer': '-',
+        'request': '/ply/ply.html',
+        'bytes': '97238',
+        'datetime': '24/Feb/2008:00:08:59 -0600',
+        'host': '140.180.132.213',
+        'user': '-',
+        'method': 'GET'}
+
+#### Field Conversion
+
+- You might want to map specific dictionary fields through a conversion function (e.g. `int()`, `float()`)
+- Map specific dictionary fields through a function
+
+        def field_map(dictseq, name, func):
+            for d in dictseq:
+                d[name] = func(d[name])
+                yield d
+
+- Example: Convert a few field values
+
+        log = field_map(log, "status", int)
+        log = field_map(log, "bytes",
+                        lambda s: int(s) if s != '-' else 0)
+
+- Creates dictionaries of converted values
+
+        {'status': 200,                            # Note conversion
+        'proto': 'HTTP/1.1',
+        'referrer': '-',
+        'request': '/ply/ply.html',
+        'bytes': 97238,                            # Note conversion
+        'datetime': '24/Feb/2008:00:08:59 -0600',
+        'host': '140.180.132.213',
+        'user': '-',
+        'method': 'GET'}
+
+#### Code so Far
+
+    lognames = gen_find("access-log*","www")
+    logfiles = gen_open(lognames)
+    loglines = gen_cat(logfiles)
+    groups = (logpat.match(line) for line in loglines)
+    tuples = (g.groups() for g in groups if g)
+
+    colnames = ('host','referrer','user','datetime','method',
+                'request','proto','status','bytes')
+
+    log = (dict(zip(colnames,t)) for t in tuples)
+    log = field_map(log,"bytes",
+                    lambda s: int(s) if s != '-' else 0)
+    log = field_map(log,"status",int)
+
+#### Getting Organized
+
+- As a processing pipeline grows, certain parts of it may be useful components on their own
+
+<center> <img src = "getting_organized.png"> </center>
+<br>
+- A series of pipeline stages can be easily encapsulated by a normal Python function
+
+#### Packaging
+
+- Extending from above, to make it more sane, you may want to package parts of the code into functions.
+
+- **Example:** multiple pipeline stages inside a functions
+
+        def lines_from_dir(filepat, dirname):
+            names = gen_find(filepat, dirname)
+            files = gen_open(names)
+            lines = gen_cat(files)
+            return lines
+
+- This is now a general purpose component that can be used as a single element in other pipelines
+
+- **Example:** Parse an Apache log into dicts
+
+        def apache_log(lines):
+            groups = (logpat.match(line) for line in lines)
+            tuples = (g.groups() for g in groups if g)
+
+            colnames = ('host', 'referrer', 'user', 'datetime', 'method',
+                        'request', 'proto', 'status', 'bytes')
+
+            log = (dict(zip(colnames, t)) for t in tuples)
+            log = field_map(log, "bytes",
+                            lambda s: int(s) if s != '-' else 0)
+            log = field_map(log, "status", int)
+
+            return log
+
+#### Example Use
+
+    lines = lines_from_dir("access-log*", "www")
+    log = apache_log(lines)
+
+    for r in log:
+        print(r)
+
+- Different components have been subdivided according to the data that they process
+
+
+#### A Query Language
+
+- Now that we have our log, let's do some queries
+
+- Find the set of all documents that 404
+
+        stat404 = set(r['request'] for r in log if r['status'] == 404)
+
+- Print all requests that transfer over a megabyte
+
+        large = (r for r in log if r['bytes'] > 1000000)
+        for r in large:
+            print(r['request'], r['bytes'])
+
+- Find the largest data transfer
+
+        print("{} {}".format(max((r['bytes'], r['request']) for r in log)))
+
+- Collect all unique host IP addresses
+
+        hosts = set(r['host'] for r in log)
+
+- Find the number of downloads of a file
+
+        sum(1 for r in log if r['request'] == '/ply/ply-2.3.tar.gz')
+
+- Find out who has been hitting robots.txt
+
+        addrs = set(r['host'] for i in log if 'robots.txt' in r['request'])
+
+        import socket
+        for addr in addrs:
+            try:
+                print(socket.gethostbyaddr(addr)[0])
+            except socket.herror:
+                print(addr)
+
+#### Some Thoughts
+
+- The beauty of generators lies in the fact that you can plug filters at almost any stage
+
+- Like the idea of using generator expressions as a pipeline query language
+
+- You can write simple filters, extract data etc.
+
+- You can pass dictionaries/objects through the pipeline, it becomes quite powerful
+
+- Feels similar to writing SQL queries
